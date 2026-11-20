@@ -9,6 +9,8 @@ const model = process.env.OPENROUTER_MODEL ?? "openai/gpt-5.6-luna"
 
 marked.use(markedTerminal() as MarkedExtension);
 
+const messages: { role: "user" | "assistant"; content: string }[] = [];
+
 while (true) {
     let userMessage: string;
     try {
@@ -20,15 +22,18 @@ while (true) {
         throw error;
     }
 
+    messages.push({ role: "user", content: userMessage });
+
     const result = await client.chat.send({
         chatRequest: {
             model,
-            messages: [{ role: "user", content: userMessage }],
+            messages: messages,
         },
     });
 
     const content = result.choices[0]?.message.content;
     const response = typeof content === "string" && content.trim() ? content : "The model returned no text.";
+    messages.push({ role: "assistant", content: response });
     const formatted = await marked.parse(response);
     console.log(chalk.green("Assistant:"));
     console.log(formatted.trimEnd());
