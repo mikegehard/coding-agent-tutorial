@@ -69,46 +69,51 @@ while (true) {
 
     const message = result.choices[0]?.message;
     await logResponse(message);
-    const toolCall = message?.toolCalls?.[0];
+    const toolCalls = message?.toolCalls ?? [];
     let content = message?.content;
 
-    if (message && toolCall) {
-        let toolResult: string;
-        let toolPath = "<invalid path>";
-        try {
-            const path: unknown = JSON.parse(toolCall.function.arguments)?.path;
-            if (typeof path === "string") toolPath = path;
-            if (typeof path !== "string" || !path || isAbsolute(path)) {
-                throw new Error("Expected a relative project path.");
+    if (toolCalls.length > 0) {
+        messages.push({ ...message, role: "assistant", toolCalls });
+
+        for (const toolCall of toolCalls) {
+            let toolResult: string;
+            let toolPath = "<invalid path>";
+            try {
+                const path: unknown = JSON.parse(toolCall.function.arguments)?.path;
+                if (typeof path === "string") toolPath = path;
+                if (typeof path !== "string" || !path || isAbsolute(path)) {
+                    throw new Error("Expected a relative project path.");
+                }
+
+                console.log(`Tool: read_file(${path})`);
+                const root = await realpath(process.cwd());
+                const file = await realpath(resolve(root, path));
+                const projectPath = relative(root, file);
+                if (projectPath === ".." || projectPath.startsWith(`..${sep}`) || isAbsolute(projectPath)) {
+                    throw new Error("The path is outside the project.");
+                }
+
+                toolResult = await readFile(file, "utf8");
+            } catch (error) {
+                toolResult = `Read failed: ${error instanceof Error ? error.message : String(error)}`;
             }
 
-            console.log(`Tool: read_file(${path})`);
-            const root = await realpath(process.cwd());
-            const file = await realpath(resolve(root, path));
-            const projectPath = relative(root, file);
-            if (projectPath === ".." || projectPath.startsWith(`..${sep}`) || isAbsolute(projectPath)) {
-                throw new Error("The path is outside the project.");
-            }
-
-            toolResult = await readFile(file, "utf8");
-        } catch (error) {
-            toolResult = `Read failed: ${error instanceof Error ? error.message : String(error)}`;
+            await log(`[tool] ${toolCall.function.name}(${toolPath}): ${toolResult.length} chars`);
+            messages.push({ role: "tool", toolCallId: toolCall.id, content: toolResult });
         }
-
-        await log(`[tool] ${toolCall.function.name}(${toolPath}): ${toolResult.length} chars`);
-        messages.push({ ...message, role: "assistant", toolCalls: [toolCall] });
-        messages.push({ role: "tool", toolCallId: toolCall.id, content: toolResult });
 
         await log(`[llm] request: ${messages.length} messages, tools: none`);
         const followUp = await client.chat.send({ chatRequest: { model, messages } });
         const followUpMessage = followUp.choices[0]?.message;
         await logResponse(followUpMessage);
-        content = followUpMessage?.content;
+        content = followUpMessage?.toolCalls?.length
+            ? "The model requested another tool after the batch. This turn only supports one batch."
+            : followUpMessage?.content;
     }
 
     const response = typeof content === "string" && content.trim()
         ? content
-        : toolCall ? "The model returned no text after the file read attempt." : "The model returned no text.";
+        : toolCalls.length ? "The model returned no text after the file read attempt." : "The model returned no text.";
     messages.push({ role: "assistant", content: response });
     const formatted = await marked.parse(response);
     console.log(chalk.green("Assistant:"));
