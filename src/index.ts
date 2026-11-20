@@ -1,9 +1,9 @@
-import { readFile, realpath } from "node:fs/promises";
+import { appendFile, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import chalk from "chalk";
 import { input } from "@inquirer/prompts";
 import { OpenRouter } from "@openrouter/sdk";
-import type { ChatMessages } from "@openrouter/sdk/models";
+import type { ChatAssistantMessage, ChatMessages } from "@openrouter/sdk/models";
 import { marked, type MarkedExtension } from "marked";
 import { markedTerminal } from "marked-terminal";
 
@@ -13,6 +13,25 @@ const model = process.env.OPENROUTER_MODEL ?? "openai/gpt-5.6-luna"
 marked.use(markedTerminal() as MarkedExtension);
 
 const messages: ChatMessages[] = [];
+
+function log(entry: string) {
+    return appendFile("agent.log", `${new Date().toISOString()} ${entry}\n`);
+}
+
+function logResponse(message: ChatAssistantMessage | undefined) {
+    const calls = message?.toolCalls;
+    if (calls?.length) {
+        const details = calls.map(({ function: fn }) => `${fn.name}(${fn.arguments})`);
+        return log(`[llm] response: tool_calls: ${details.join(", ")}`);
+    }
+
+    const content = message?.content;
+    if (typeof content === "string" && content.trim()) {
+        return log(`[llm] response: assistant text: ${content.length} chars`);
+    }
+
+    return log("[llm] response: empty");
+}
 
 while (true) {
     let userMessage: string;
@@ -27,6 +46,7 @@ while (true) {
 
     messages.push({ role: "user", content: userMessage });
 
+    await log(`[llm] request: ${messages.length} messages, tools: read_file`);
     const result = await client.chat.send({
         chatRequest: {
             model,
@@ -48,13 +68,16 @@ while (true) {
 
 
     const message = result.choices[0]?.message;
+    await logResponse(message);
     const toolCall = message?.toolCalls?.[0];
     let content = message?.content;
 
     if (message && toolCall) {
         let toolResult: string;
+        let toolPath = "<invalid path>";
         try {
             const path: unknown = JSON.parse(toolCall.function.arguments)?.path;
+            if (typeof path === "string") toolPath = path;
             if (typeof path !== "string" || !path || isAbsolute(path)) {
                 throw new Error("Expected a relative project path.");
             }
@@ -72,11 +95,15 @@ while (true) {
             toolResult = `Read failed: ${error instanceof Error ? error.message : String(error)}`;
         }
 
+        await log(`[tool] ${toolCall.function.name}(${toolPath}): ${toolResult.length} chars`);
         messages.push({ ...message, role: "assistant", toolCalls: [toolCall] });
         messages.push({ role: "tool", toolCallId: toolCall.id, content: toolResult });
 
+        await log(`[llm] request: ${messages.length} messages, tools: none`);
         const followUp = await client.chat.send({ chatRequest: { model, messages } });
-        content = followUp.choices[0]?.message.content;
+        const followUpMessage = followUp.choices[0]?.message;
+        await logResponse(followUpMessage);
+        content = followUpMessage?.content;
     }
 
     const response = typeof content === "string" && content.trim()
