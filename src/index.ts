@@ -33,24 +33,12 @@ function logResponse(message: ChatAssistantMessage | undefined) {
     return log("[llm] response: empty");
 }
 
-while (true) {
-    let userMessage: string;
-    try {
-        userMessage = await input({ message: chalk.cyan("You:") });
-    } catch (error) {
-        if (error instanceof Error && error.name === "ExitPromptError") {
-            break;
-        }
-        throw error;
-    }
-
-    messages.push({ role: "user", content: userMessage });
-
+async function askModel() {
     await log(`[llm] request: ${messages.length} messages, tools: read_file`);
-    const result = await client.chat.send({
+    return client.chat.send({
         chatRequest: {
             model,
-            messages: messages,
+            messages,
             tools: [{
                 type: "function",
                 function: {
@@ -65,14 +53,41 @@ while (true) {
             }],
         },
     });
+}
 
+while (true) {
+    let userMessage: string;
+    try {
+        userMessage = await input({ message: chalk.cyan("You:") });
+    } catch (error) {
+        if (error instanceof Error && error.name === "ExitPromptError") {
+            break;
+        }
+        throw error;
+    }
 
-    const message = result.choices[0]?.message;
-    await logResponse(message);
-    const toolCalls = message?.toolCalls ?? [];
-    let content = message?.content;
+    messages.push({ role: "user", content: userMessage });
 
-    if (toolCalls.length > 0) {
+    let response: string;
+    for (let rounds = 0; ; rounds++) {
+        const result = await askModel();
+        const message = result.choices[0]?.message;
+        await logResponse(message);
+        const toolCalls = message?.toolCalls ?? [];
+
+        if (toolCalls.length === 0) {
+            const content = message?.content;
+            response = typeof content === "string" && content.trim()
+                ? content
+                : "The model returned no text.";
+            break;
+        }
+
+        if (rounds === 5) {
+            response = "The model reached the five-round tool limit.";
+            break;
+        }
+
         messages.push({ ...message, role: "assistant", toolCalls });
 
         for (const toolCall of toolCalls) {
@@ -101,19 +116,8 @@ while (true) {
             await log(`[tool] ${toolCall.function.name}(${toolPath}): ${toolResult.length} chars`);
             messages.push({ role: "tool", toolCallId: toolCall.id, content: toolResult });
         }
-
-        await log(`[llm] request: ${messages.length} messages, tools: none`);
-        const followUp = await client.chat.send({ chatRequest: { model, messages } });
-        const followUpMessage = followUp.choices[0]?.message;
-        await logResponse(followUpMessage);
-        content = followUpMessage?.toolCalls?.length
-            ? "The model requested another tool after the batch. This turn only supports one batch."
-            : followUpMessage?.content;
     }
 
-    const response = typeof content === "string" && content.trim()
-        ? content
-        : toolCalls.length ? "The model returned no text after the file read attempt." : "The model returned no text.";
     messages.push({ role: "assistant", content: response });
     const formatted = await marked.parse(response);
     console.log(chalk.green("Assistant:"));
