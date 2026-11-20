@@ -14,6 +14,7 @@ const model = process.env.OPENROUTER_MODEL ?? "openai/gpt-5.6-luna"
 marked.use(markedTerminal() as MarkedExtension);
 
 const codingSystemPrompt = `Read a file before changing it.
+When working test-first, add one behavior test at a time. Run it and confirm it fails for the expected reason before changing the implementation. Make the smallest change that passes it, then rerun the suite before adding another test.
 After making changes, run the relevant check and read its output.
 If a check fails, address that failure before moving on.
 Only claim the work is done when a check you ran confirms it.`;
@@ -176,7 +177,7 @@ while (true) {
                 if (name === "bash") {
                     if (typeof command !== "string") throw new Error("Expected a command string.");
                     toolTarget = command;
-                    console.log(`Tool: bash(${command})`);
+                    console.log(`Using: bash(${command})`);
                     toolResult = await runBash(command);
                 } else {
                     if (typeof path === "string") toolTarget = path;
@@ -185,7 +186,7 @@ while (true) {
                     }
 
                     const trace = name === "edit_file" ? `${path}, ${oldText}, ${newText}` : path;
-                    console.log(`Tool: ${name}(${trace})`);
+                    console.log(`Using: ${name}(${trace})`);
                     if (name !== "read_file" && name !== "edit_file") {
                         throw new Error(`Unknown tool: ${name}`);
                     }
