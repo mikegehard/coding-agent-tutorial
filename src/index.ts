@@ -13,7 +13,12 @@ const model = process.env.OPENROUTER_MODEL ?? "openai/gpt-5.6-luna"
 
 marked.use(markedTerminal() as MarkedExtension);
 
-const messages: ChatMessages[] = [];
+const codingSystemPrompt = `Read a file before changing it.
+After making changes, run the relevant check and read its output.
+If a check fails, address that failure before moving on.
+Only claim the work is done when a check you ran confirms it.`;
+
+const messages: ChatMessages[] = [{ role: "system", content: codingSystemPrompt }];
 
 function log(entry: string) {
     return appendFile("agent.log", `${new Date().toISOString()} ${entry}\n`);
