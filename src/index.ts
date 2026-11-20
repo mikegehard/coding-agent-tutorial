@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { appendFile, readFile, realpath, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import chalk from "chalk";
@@ -33,8 +34,53 @@ function logResponse(message: ChatAssistantMessage | undefined) {
     return log("[llm] response: empty");
 }
 
+function runBash(command: string) {
+    return new Promise<string>((resolveResult, reject) => {
+        const child = spawn("bash", ["-c", `exec 2>&1\n${command}`], {
+            cwd: process.cwd(),
+            detached: true,
+            stdio: ["ignore", "pipe", "inherit"],
+        });
+        const outputLimit = 8000;
+        let output = "";
+        let truncated = false;
+        let timedOut = false;
+
+        child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+            const remaining = outputLimit - output.length;
+            output += chunk.slice(0, remaining);
+            truncated ||= chunk.length > remaining;
+        });
+
+        const timeout = setTimeout(() => {
+            if (child.pid === undefined) return;
+            timedOut = true;
+            try {
+                process.kill(-child.pid, "SIGKILL");
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== "ESRCH") reject(error);
+            }
+        }, 30_000);
+
+        child.on("error", (error) => {
+            clearTimeout(timeout);
+            reject(error);
+        });
+        child.on("close", (code, signal) => {
+            clearTimeout(timeout);
+            const notes = [
+                output,
+                truncated ? "Output truncated after 8000 characters." : "",
+                timedOut ? "Command killed after 30 seconds." : "",
+                `Exit code: ${code ?? `none (${signal})`}`,
+            ];
+            resolveResult(notes.filter(Boolean).join("\n"));
+        });
+    });
+}
+
 async function askModel() {
-    await log(`[llm] request: ${messages.length} messages, tools: read_file, edit_file`);
+    await log(`[llm] request: ${messages.length} messages, tools: read_file, edit_file, bash`);
     return client.chat.send({
         chatRequest: {
             model,
@@ -63,6 +109,17 @@ async function askModel() {
                             new_text: { type: "string", description: "Replacement text" },
                         },
                         required: ["path", "old_text", "new_text"],
+                    },
+                },
+            }, {
+                type: "function",
+                function: {
+                    name: "bash",
+                    description: "Run a Bash command from the project root.",
+                    parameters: {
+                        type: "object",
+                        properties: { command: { type: "string" } },
+                        required: ["command"],
                     },
                 },
             }],
@@ -108,46 +165,53 @@ while (true) {
         for (const toolCall of toolCalls) {
             const { name, arguments: args } = toolCall.function;
             let toolResult: string;
-            let toolPath = "<invalid path>";
+            let toolTarget = "<invalid arguments>";
             try {
-                const { path, old_text: oldText, new_text: newText } = JSON.parse(args);
-                if (typeof path === "string") toolPath = path;
-                if (typeof path !== "string" || !path || isAbsolute(path)) {
-                    throw new Error("Expected a relative project path.");
-                }
-
-                const trace = name === "edit_file" ? `${path}, ${oldText}, ${newText}` : path;
-                console.log(`Tool: ${name}(${trace})`);
-                if (name !== "read_file" && name !== "edit_file") {
-                    throw new Error(`Unknown tool: ${name}`);
-                }
-                const root = await realpath(process.cwd());
-                const file = await realpath(resolve(root, path));
-                const projectPath = relative(root, file);
-                if (projectPath === ".." || projectPath.startsWith(`..${sep}`) || isAbsolute(projectPath)) {
-                    throw new Error("The path is outside the project.");
-                }
-
-                const text = await readFile(file, "utf8");
-                if (name === "read_file") {
-                    toolResult = text;
+                const { command, path, old_text: oldText, new_text: newText } = JSON.parse(args);
+                if (name === "bash") {
+                    if (typeof command !== "string") throw new Error("Expected a command string.");
+                    toolTarget = command;
+                    console.log(`Tool: bash(${command})`);
+                    toolResult = await runBash(command);
                 } else {
-                    if (typeof oldText !== "string" || !oldText || typeof newText !== "string") {
-                        throw new Error("Expected non-empty old_text and a string new_text.");
+                    if (typeof path === "string") toolTarget = path;
+                    if (typeof path !== "string" || !path || isAbsolute(path)) {
+                        throw new Error("Expected a relative project path.");
                     }
-                    const start = text.indexOf(oldText);
-                    if (start === -1) throw new Error("old_text was not found.");
-                    if (text.indexOf(oldText, start + 1) !== -1) {
-                        throw new Error("old_text matched more than once.");
+
+                    const trace = name === "edit_file" ? `${path}, ${oldText}, ${newText}` : path;
+                    console.log(`Tool: ${name}(${trace})`);
+                    if (name !== "read_file" && name !== "edit_file") {
+                        throw new Error(`Unknown tool: ${name}`);
                     }
-                    await writeFile(file, text.slice(0, start) + newText + text.slice(start + oldText.length));
-                    toolResult = `Updated ${path}.`;
+                    const root = await realpath(process.cwd());
+                    const file = await realpath(resolve(root, path));
+                    const projectPath = relative(root, file);
+                    if (projectPath === ".." || projectPath.startsWith(`..${sep}`) || isAbsolute(projectPath)) {
+                        throw new Error("The path is outside the project.");
+                    }
+
+                    const text = await readFile(file, "utf8");
+                    if (name === "read_file") {
+                        toolResult = text;
+                    } else {
+                        if (typeof oldText !== "string" || !oldText || typeof newText !== "string") {
+                            throw new Error("Expected non-empty old_text and a string new_text.");
+                        }
+                        const start = text.indexOf(oldText);
+                        if (start === -1) throw new Error("old_text was not found.");
+                        if (text.indexOf(oldText, start + 1) !== -1) {
+                            throw new Error("old_text matched more than once.");
+                        }
+                        await writeFile(file, text.slice(0, start) + newText + text.slice(start + oldText.length));
+                        toolResult = `Updated ${path}.`;
+                    }
                 }
             } catch (error) {
                 toolResult = `${name} failed: ${error instanceof Error ? error.message : String(error)}`;
             }
 
-            await log(`[tool] ${name}(${toolPath}): ${toolResult.length} chars`);
+            await log(`[tool] ${name}(${toolTarget}): ${toolResult.length} chars`);
             messages.push({ role: "tool", toolCallId: toolCall.id, content: toolResult });
         }
     }
